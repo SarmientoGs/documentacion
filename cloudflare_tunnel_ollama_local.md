@@ -433,3 +433,254 @@ Tunnel](https://developers.cloudflare.com/tunnel/troubleshooting/).
 -   [API de
     Ollama](https://github.com/ollama/ollama/blob/main/docs/api.md)
 -   [FastAPI](https://fastapi.tiangolo.com/)
+
+
+---
+
+# Anexo: pasos para Linux / Ubuntu
+
+Esta sección añade instrucciones para Ubuntu/Linux. Los pasos anteriores del documento se mantienen sin cambios.
+
+## L1. Comprobar Ollama en Ubuntu
+
+Comprueba que Ollama está instalado y que el servicio está activo:
+
+```bash
+ollama --version
+ollama list
+systemctl status ollama --no-pager
+```
+
+Prueba su API local:
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+Si Ollama está instalado como servicio y no está activo:
+
+```bash
+sudo systemctl enable --now ollama
+```
+
+**Mantén Ollama accesible únicamente desde la máquina local.** No cambies `OLLAMA_HOST` para escuchar en todas las interfaces y no abras el puerto `11434` en el firewall o router.
+
+## L2. Crear el gateway FastAPI en Ubuntu
+
+Instala Python, `venv` y `pip` si hacen falta:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+```
+
+Crea el proyecto y el entorno virtual:
+
+```bash
+mkdir -p ~/ollama-gateway
+cd ~/ollama-gateway
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install fastapi uvicorn httpx
+```
+
+Crea el archivo `app.py` y copia el código de la sección **3. Crear un gateway local con FastAPI**. Ese código es multiplataforma y puede utilizarse en Ubuntu sin cambios.
+
+Genera una API key:
+
+```bash
+python -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Guárdala en un lugar seguro. No la incluyas en Git ni la compartas con los clientes.
+
+## L3. Configurar la clave y probar el gateway
+
+En la misma terminal, configura la variable de entorno. Sustituye el valor por la clave que generaste:
+
+```bash
+export OLLAMA_GATEWAY_API_KEY='PEGA_AQUI_TU_CLAVE_ALEATORIA'
+```
+
+Asegúrate de que `ALLOWED_MODELS` en `app.py` coincide con los nombres exactos de `ollama list`.
+
+Inicia el gateway escuchando solo en loopback:
+
+```bash
+uvicorn app:app --host 127.0.0.1 --port 8001
+```
+
+En otra terminal, comprueba el estado:
+
+```bash
+curl http://127.0.0.1:8001/health
+```
+
+Prueba una generación autenticada:
+
+```bash
+curl --fail-with-body \
+  -X POST http://127.0.0.1:8001/api/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: PEGA_AQUI_TU_CLAVE_ALEATORIA" \
+  -d '{
+    "model": "qwen3:4b",
+    "messages": [
+      {"role": "user", "content": "Responde brevemente: ¿qué eres?"}
+    ],
+    "stream": false
+  }'
+```
+
+Si utilizas otro modelo, reemplaza `qwen3:4b` por el nombre exacto de `ollama list`.
+
+## L4. Mantener el gateway activo con systemd
+
+Para una instalación persistente, es preferible ejecutar el gateway con un usuario dedicado y `systemd`, en lugar de dejar una terminal abierta.
+
+Crea un usuario de sistema para el servicio:
+
+```bash
+sudo useradd --system --create-home --home-dir /opt/ollama-gateway \
+  --shell /usr/sbin/nologin ollama-gateway
+```
+
+Copia el proyecto a `/opt/ollama-gateway` y asigna permisos:
+
+```bash
+sudo mkdir -p /opt/ollama-gateway
+sudo cp app.py /opt/ollama-gateway/app.py
+sudo python3 -m venv /opt/ollama-gateway/.venv
+sudo /opt/ollama-gateway/.venv/bin/pip install fastapi uvicorn httpx
+sudo chown -R ollama-gateway:ollama-gateway /opt/ollama-gateway
+sudo chmod 750 /opt/ollama-gateway
+```
+
+Crea un archivo de entorno para el secreto:
+
+```bash
+sudo install -m 600 -o root -g root /dev/null /etc/ollama-gateway.env
+sudo nano /etc/ollama-gateway.env
+```
+
+Añade esta línea al archivo, reemplazando el valor por la clave real:
+
+```text
+OLLAMA_GATEWAY_API_KEY=PEGA_AQUI_TU_CLAVE_ALEATORIA
+```
+
+Crea la unidad de systemd:
+
+```bash
+sudo nano /etc/systemd/system/ollama-gateway.service
+```
+
+Contenido:
+
+```ini
+[Unit]
+Description=Ollama FastAPI Gateway
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ollama-gateway
+Group=ollama-gateway
+WorkingDirectory=/opt/ollama-gateway
+EnvironmentFile=/etc/ollama-gateway.env
+ExecStart=/opt/ollama-gateway/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8001
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Activa y arranca el servicio:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ollama-gateway
+sudo systemctl status ollama-gateway --no-pager
+```
+
+Consulta los registros si hay problemas:
+
+```bash
+sudo journalctl -u ollama-gateway -n 100 --no-pager
+```
+
+**Nota:** el usuario `ollama-gateway` debe poder conectarse a `127.0.0.1:11434`; no necesita acceso directo a la GPU ni permisos especiales sobre los archivos de los modelos.
+
+## L5. Instalar y configurar cloudflared en Ubuntu
+
+La forma recomendada es seguir las instrucciones de instalación para Debian/Ubuntu de la documentación oficial, porque el método puede cambiar con el tiempo:
+
+[Instalar cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+
+Después de instalarlo, sigue estos pasos:
+
+1. En el panel de Cloudflare, entra a **Networking → Tunnels** y crea un túnel con el conector `cloudflared`.
+2. Selecciona Linux/Debian en las instrucciones del panel.
+3. Copia y ejecuta el comando exacto que proporciona Cloudflare para instalar el conector como servicio. En túneles administrados remotamente, el comando suele incluir un token.
+4. Trata el token como una contraseña: no lo publiques, no lo guardes en el repositorio y rótalo si se filtra.
+5. En la configuración del túnel, añade una ruta de aplicación publicada:
+   - **Hostname:** `ollama-api.tudominio.com`
+   - **Service / URL:** `http://127.0.0.1:8001`
+6. Confirma en el panel que el conector aparece como conectado o `Healthy`.
+
+No configures el destino del túnel como `http://127.0.0.1:11434`; debe apuntar al gateway FastAPI local.
+
+Puedes comprobar el servicio de `cloudflared` con:
+
+```bash
+sudo systemctl status cloudflared --no-pager
+sudo journalctl -u cloudflared -n 100 --no-pager
+```
+
+El nombre del servicio puede variar según el método de instalación que hayas utilizado. Si `cloudflared` no aparece como servicio, vuelve a las instrucciones generadas en el panel de Cloudflare para tu túnel.
+
+## L6. Proteger el hostname con Cloudflare Access
+
+Configura Cloudflare Access como se explica en la sección **5. Proteger el hostname con Cloudflare Access** del documento principal:
+
+- Crea una aplicación **Self-hosted** para `ollama-api.tudominio.com`.
+- Crea una política que permita **Service Auth** mediante un Service Token.
+- Guarda el Client ID y Client Secret en el gestor de secretos de tu API en la nube.
+- La API en la nube debe enviar `CF-Access-Client-Id`, `CF-Access-Client-Secret` y `X-API-Key`.
+
+No coloques estos secretos en el frontend, en Angular ni en repositorios.
+
+## L7. Pruebas desde la nube
+
+Desde tu API en la nube, utiliza el ejemplo Python de la sección **6. Llamar a Ollama desde la API alojada en la nube**. Cambia la URL por tu hostname real y configura las tres variables de entorno necesarias en la plataforma de nube.
+
+Si falla, comprueba por separado:
+
+```bash
+# En el equipo Ubuntu: Ollama
+curl http://127.0.0.1:11434/api/tags
+
+# En el equipo Ubuntu: gateway
+curl http://127.0.0.1:8001/health
+
+# Servicios
+sudo systemctl status ollama ollama-gateway cloudflared --no-pager
+```
+
+Si el gateway local funciona, pero la API en la nube no puede conectarse, revisa el estado del túnel, DNS, la política de Access, los Service Tokens y los registros de `cloudflared`.
+
+## L8. Consideraciones para Ubuntu
+
+- El PC/servidor debe permanecer encendido y conectado a Internet.
+- Desactiva la suspensión automática si el equipo debe responder solicitudes continuamente.
+- No abras los puertos `11434` ni `8001` al exterior.
+- Mantén el sistema actualizado y limita quién puede leer `/etc/ollama-gateway.env`.
+- Configura límites de concurrencia y cuotas antes de ofrecer el servicio a varios clientes.
+- Para producción, evalúa el uso de un usuario de sistema dedicado, monitorización y alertas de disponibilidad.
